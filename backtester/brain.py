@@ -5,7 +5,8 @@ from utils.market_forces import *
 from datetime import datetime
 from backtester.slippage_modeling import *
 from backtester.signal import Signal
-
+from collections import deque
+import warnings
 
 
 class Brain():
@@ -28,6 +29,7 @@ class Brain():
         self.slippage_context=slippage_context 
         self.execution_delay=execution_delay 
         self.trade_history=list[Signal]
+        self.signals_to_execute: deque[Signal] = deque() # signals to execute are in a queue
 
     def hook_data_feed(self, filepath):
         self.data_feed=Datafeed()
@@ -42,7 +44,6 @@ class Brain():
         self.model_impact_fct=model_impact_fct
         self.model_impact_coeff=model_impact_coeff
         self.fee_structure=fee_structure
-        #specifier les args supp de fee_structure de sorte que les 2 seuls non specifiés sont order_size/nb_shares et share_price
 
 
     def hook_wallet(self, wallet):
@@ -51,75 +52,95 @@ class Brain():
     def hook_slippage_model(self, model : SlippageModel):
         self.slippage_model=model
 
-    def is_signal_valid(self, signal):
-        if signal.ticker != self.data_feed.ticker:
-            return False
 
-
-
-    def execute_signals(self, signals, current_price, current_time):
-        #verifier le signal (specifique a chaque type de signal)
-        #executer le signal (specifique a chaque type de signal)
+    def execute_signals(self, current_price, current_time):
         if current_time==self.data_feed.data.index[-1]:
             print("Can't execute signals on the last bar, because execution delay requires the signal to be executed on the next bar.")
             return 0
-
-
-        for signal in signals:
+        signal= self.signals_to_execute.popleft()
+        invalid_orders=deque()
+        signals_to_repeat=deque()
+        while signal is not None:
+            
+        #for signal in self.signals_to_execute:
             if signal.ticker!=self.data_feed.ticker:
-                print("signal {} received on {} is invalid because ticker {} doesn't match the datafeed's ticker.".format(signal, current_time, signal.ticker))
-                # This signal wont be executed, and will later be deleted.
+                print(f"Signal {signal} received on {current_time} is invalid because ticker {signal.ticker} doesn't match the datafeed's ticker.")
                 continue
             match signal.ttype:
                 case "BUY_MARKET":
-                    #1verify order: assez de cash, ticker. si sell, verifier si les shares sont en possession
-                    #2apply fee
-                    #3apply slippage(si market, pas limit)
-                    #4deduce cash
-                    #5increase share nb in wallet (pour market. Pour limit, ajouter a une list de limit orders)
-                    #6add signal to history
-                    #7delete signal(si market)
-    
-                    fee=self.fee_structure(current_price, signal.nb_shares)
-                    if self.fee_structure.application=="deducted":
-                        total
-                    else: 
-                        pass #self.wallet.cash-=fee?????????
-
-                    # Verify order: 
-                    
-
-                    # Apply delay:
-                    true_execution_time= self.data_feed.data.index[self.data_feed.data.index.get_loc(current_time) + 1]
-                    self.slippage_context.price=self.data_feed.data[true_execution_time]["Open"]
-
-                    # Apply slippage
-                    new_cost_per_share=self.slippage_model(self.slippage_context)
-                    
-                    # Compute how many shares are bought
-                    nb_shares=signal.money/new_cost_per_share
-
-                    # Update wallet
-                    self.wallet.cash-=signal.money-fee
-                    self.wallet.stocks[signal.ticker]+=nb_shares
-                    
-                    # Update history
-                    self.trade_history.append(signal)
-                    #pr deducted_fee: retirer le fee a l'argent de l'order, plutot que du wallet?
-
+                    fill_price=self.slippage_model.compute_fill_price(self.slippage_context)
+                    fee=self.fee_structure.compute_fee(signal.size, fill_price)
+                    if self.fee_structure.application == "on top":                
+                        if self.wallet.cash<fee+signal.size*fill_price:                  #TODO: comment factoriser ces 3 lignes ?
+                            warnings.warn("Order {signal} cannot be executed: insufficient funds.")
+                            invalid_orders.append(signal)
+                            continue
+                        self.wallet.cash-=(fee+signal.size*fill_price)
+                        self.wallet.stocks[signal.ticker]+=signal.size
+                        self.trade_history.append(signal)
+                    else:
+                        if self.wallet.cash>signal.size*fill_price: 
+                            warnings.warn("Order {signal} cannot be executed: insufficient funds.")
+                            invalid_orders.append(signal)
+                            continue
+                        actual_share_nb=signal.size-fill_price/fee
+                        self.wallet.cash-=signal.size*fill_price
+                        self.wallet.stocks[signal.ticker]+=actual_share_nb
+                        self.trade_history.append(signal)
 
                 case "SELL_MARKET":
+                    fill_price=self.slippage_model.compute_fill_price(self.slippage_context)
+                    fee=self.fee_structure.compute_fee(signal.size, fill_price)
+                    if self.fee_structure.application == "on top":
+                        if self.wallet.cash<fee or self.wallet.shares[signal.ticker]<signal.size:
+                            warnings.warn("Order {signal} cannot be executed: insufficient funds.")
+                            invalid_orders.append(signal)
+                            continue
+                        self.wallet.cash-=(fee+signal.sizer*fill_price)
+                        self.wallet.stocks[signal.ticker]-=signal.size
+                        self.trade_history.append(signal)
+                    else:
+                        if signal.size*fill_price<fee or self.wallet.share[signal.ticker]<signal.size: 
+                            warnings.warn("Order {signal} cannot be executed: sell is to small to cover fees.")
+                            invalid_orders.append(signal)
+                            continue
+                        self.wallet.cash+=(signal.size*fill_price-fee)
+                        self.wallet.stocks[signal.ticker]-=signal.size
+                        self.trade_history.append(signal)
+
+                case "BUY_LIMIT": #pas encore implemté
+                    """
+                    if is_limit_valid(signal):
+                        executer le signal
+                    else:
+                        signals_to_repeat.append(signal)
+                    """
+                    pass
+                case "SELL_LIMIT": #pas encore implemté
+                    """
+                    if is_limit_valid(signal):
+                        executer le signal
+                    else:
+                        signals_to_repeat.append(signal)
+                    """
+                    pass
+                case "CANCEL_LIMIT_ORDER":
+                    """
+                    chercher dans la queue des signaux a executer et de ceux a repeter, si on trouve le signal avec l'id specifié, le retirer.
+                    peut eventuellement utiliser order.size comme l'id de l'order a supp, pratique mais + glr a comprendre.
+                    """
                     pass
 
-                case "BUY_LIMIT":
-                    pass
-
-                case "SELL_LIMIT":
-                    pass
-
-
+            signal= self.signals_to_execute.popleft()
+        
+        
+        
         # All remaining signals are invalid and have to be deleted
         # ou renvoyer feedback des signaux invalide?
+        #pour les LIMIT, faut les laisser dans la queue tant qu'ils sont pas executés, expirés, ou annulés (grace a l'id)
+
+        self.signals_to_execute.append(signals_to_repeat)
+        return invalid_orders
 
 
     def update_context(self):
@@ -127,14 +148,17 @@ class Brain():
 
 
     def run(self,):
-        if self.data_feed is None or self.strategy is None or self.wallet is None:
-            raise ValueError("Undefined strategy or datafeed.")
         #si la frequence de la strategy est incompatible avec le data feed, erreur
         #if self.strategy.frequency!=data_feed
         """
         iterer sur le datafeed, et a chaque iteration, appeler next de strategy"""
         for i in Datafeed.data:
-            pass
+            self.update_context()#dans le contexte, la date d'execution (ie la date sur laquelle est appliquée le reste du slippage genre spread, auction prenium etc
+            #doit etre avancée de 1 pour simuler le delai)
+            new_signals=self.strategy.next(i)
+            self.signals_to_execute.append(new_signals)
+            self.execute_signals()
+
     
     
 
