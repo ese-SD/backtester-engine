@@ -41,11 +41,13 @@ class SlippageModel:
             if fct is not None:
                 total += coeff * fct(self.context)
         return total
-    
+#devnote: utiliser direction (=1 ou -1) pr modeliser l'achat et vente + simplement?    
 
 
 #----------------------------------------------------------------SPREAD MODELS--------------------------------------------------------
 
+
+# TODO: changer signature, prendre le context uniquement, extraire le reste du contexte (comme H1,H2 etc)
 
 def model_spread_CS(H1,L1,H2,L2, upper_bound, close, correct_overnight=True, return_vol=False):
     """ 
