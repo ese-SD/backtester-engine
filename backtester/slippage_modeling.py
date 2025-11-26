@@ -3,20 +3,30 @@ from typing import Any
 from math import log,sqrt,exp,pi
 from functools import partial, partialmethod
 from datetime import datetime
+from abc import ABC, abstractmethod
 
 
 
 @dataclass
-class SlippageContext:
+class SlippageContext(ABC):
     """
-    Dataclass that contains the necessary infos to model slippage.
+    Snapshot of the data in Brain that can be used to compute slippage.
     All the data that isnt common to all slippage models is stored in extra.
     """
-    price: float = field(default=0)
-    order_size: int = field(default=0)
-    timestamp: str =field(default=datetime(1970, 1, 1))
+    price: float
+    order_size: int
+    timestamp: datetime
+    # Optional additional informations required by specific slippage components. ex previous OHLC bars
     extra: dict[str, Any] = field(default_factory=dict)
 
+    @abstractmethod
+    def update_context(self):
+        """
+        Updates the context with new inputs coming from Brain.
+
+        This allows different slippage models to request or maintain different types of state like rolling OHLC windows, intraday data etc
+        """
+        pass
 
 
 
