@@ -10,8 +10,10 @@ from abc import ABC, abstractmethod
 @dataclass
 class SlippageContext(ABC):
     """
-    Snapshot of the data in Brain that can be used to compute slippage.
-    All the data that isnt common to all slippage models is stored in extra.
+    Snapshot of the information used to compute slippage at a given moment.
+    Common fields (price, order_size, timestamp) are always required.
+    Model-specific or temporary fields go into `extra`.
+    Each concrete slippage model must implement `update_context() to refresh the context using the latest data from Brain.
     """
     price: float
     order_size: int
